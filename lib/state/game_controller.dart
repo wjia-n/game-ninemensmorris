@@ -1,9 +1,20 @@
 /// Game flow controller: turns, selection, captures, bot scheduling, undo,
 /// hints, draws, pause/resume, persistence and statistics.
 ///
-/// The rules themselves live in [MorrisEngine] (pure); this class owns the
-/// mutable match state and the human/bot interaction loop. Notifies listeners
-/// on every state change so the carved-stone UI can animate.
+/// Turn-state ownership:
+/// - The pure rules live in [MorrisEngine] (placement / movement / flying,
+///   mills, capture protection, win/draw detection). The controller never
+///   invents rule outcomes.
+/// - Turn *flow* (who acts, when the bot acts, staged bot animation beats)
+///   is owned here by an explicit [BotStage] state machine plus a watchdog
+///   timer. Stuck states are impossible by construction: every stage has a
+///   live timer or a watchdog recovery, and the watchdog re-schedules a bot
+///   turn whenever one is due but nothing is in flight.
+///
+/// Bot visibility: bot turns are never instant. Each bot turn walks through
+/// visible stages — thinking (narration) → acting (the move animates on the
+/// board) → capturing (mill flash, then the seized man animates out) — with
+/// a narration line for every beat.
 library;
 
 import 'dart:async';
@@ -22,6 +33,11 @@ import 'stats.dart';
 
 enum GameMode { vsAi, twoPlayer }
 
+/// Bot turn stages. `idle` means no bot work is in flight; every other stage
+/// is owned by a live delayed future, and the watchdog recovers `idle`-with-
+/// bot-to-move (the only stage the watchdog is allowed to advance).
+enum BotStage { idle, scheduled, thinking, acting, capturing }
+
 class PendingPly {
   final int from;
   final int to;
@@ -36,7 +52,7 @@ class GameController extends ChangeNotifier {
 
   final Random _rng = Random();
   int _gameId = 0;
-  bool _botScheduled = false;
+  bool _disposed = false;
 
   // --- match config ----------------------------------------------------------
   GameMode mode = GameMode.vsAi;
@@ -53,8 +69,38 @@ class GameController extends ChangeNotifier {
   bool paused = false;
   DateTime? _startedAt;
 
+  /// True while a game session is live on the game screen. Cleared by
+  /// [quitToMenu] so the watchdog never advances a saved game in the menu.
+  bool _inGame = false;
+
+  // --- bot turn state machine --------------------------------------------------
+  BotStage _botStage = BotStage.idle;
+  BotStage get botStage => _botStage;
+  bool get botBusy => _botStage != BotStage.idle;
+
+  /// Narration line for the current bot beat ("Sargon studies the stones…").
+  String botNarrative = '';
+
+  /// The bot's current move, exposed so the UI animates it visibly.
+  int botFrom = -1;
+  int botTo = -1;
+
+  /// The bot's in-flight move preview: shown on the board during the acting
+  /// beat so the move is visible well before the turn settles.
+  PendingPly? botPreview;
+
+  /// The man the bot is about to seize, highlighted before removal.
+  int botCaptureAt = -1;
+
+  /// Watchdog: recovers any bot turn left without a live timer.
+  Timer? _watchdog;
+
+  /// How many times the watchdog recovered a stalled bot turn (test hook).
+  int watchdogRecoveries = 0;
+
   // --- animation / feedback transients ----------------------------------------
   int lastPlaced = -1;
+  int lastFrom = -1; // origin of the last slide (for slide animation)
   int lastCaptured = -1;
   Set<int> millFlash = {};
   int? hintFrom;
@@ -67,17 +113,26 @@ class GameController extends ChangeNotifier {
 
   // --- derived -----------------------------------------------------------------
   int get turn => snap.turn;
-  List<int> get board => pending?.board ?? snap.board;
-  List<int> get reserve => pending?.reserve ?? snap.reserve;
+
+  /// The board as the player sees it: the bot's in-flight move (during its
+  /// visible acting beat) or the human's unresolved mill preview take
+  /// precedence over the settled snapshot.
+  List<int> get board =>
+      botPreview?.board ?? pending?.board ?? snap.board;
+  List<int> get reserve =>
+      botPreview?.reserve ?? pending?.reserve ?? snap.reserve;
   bool get gameOver => winner != null;
   bool get capturePending => pending != null;
   bool get isBotTurn =>
-      !gameOver && mode == GameMode.vsAi && turn != humanSeat;
+      _inGame && !gameOver && mode == GameMode.vsAi && turn != humanSeat;
   bool get inPlacement => reserve[turn] > 0;
   bool get canUndo =>
-      !gameOver && !isBotTurn && !capturePending && _history.isNotEmpty;
+      !gameOver && !isBotTurn && !capturePending && !botBusy && _history.isNotEmpty;
   bool get placementDone => MorrisEngine.placementDone(snap.reserve);
   bool get flyingTurn => MorrisEngine.isFlying(board, reserve, turn);
+
+  /// Display name for a seat (renameable, persisted).
+  String seatName(int seat) => SettingsStore.I.playerName(seat);
 
   List<int> get captureTargets =>
       capturePending ? MorrisEngine.captureTargets(board, turn) : const [];
@@ -88,6 +143,7 @@ class GameController extends ChangeNotifier {
 
   String phaseLabel() {
     if (gameOver) return '';
+    if (botBusy && botNarrative.isNotEmpty) return botNarrative;
     if (capturePending) return 'MILL! Choose an enemy man to capture';
     if (reserve[turn] > 0) {
       return 'PLACING · ${reserve[turn]} in reserve';
@@ -129,12 +185,21 @@ class GameController extends ChangeNotifier {
     endReason = null;
     paused = false;
     lastPlaced = -1;
+    lastFrom = -1;
     lastCaptured = -1;
     millFlash = {};
     hintFrom = null;
     hintTo = null;
+    _botStage = BotStage.idle;
+    botNarrative = '';
+    botFrom = -1;
+    botTo = -1;
+    botPreview = null;
+    botCaptureAt = -1;
+    _inGame = true;
     _startedAt = DateTime.now();
     _evalHistory.clear();
+    _startWatchdog();
     Sound.I.gameStart();
     Sound.I.gameMusic();
     await _saveGame();
@@ -165,9 +230,16 @@ class GameController extends ChangeNotifier {
       winner = null;
       endReason = null;
       paused = false;
+      _botStage = BotStage.idle;
+      botNarrative = '';
+      botFrom = -1;
+      botTo = -1;
+      botCaptureAt = -1;
+      _inGame = true;
       _startedAt = DateTime.fromMillisecondsSinceEpoch(
           (j['startedAt'] as int?) ?? DateTime.now().millisecondsSinceEpoch);
       _evalHistory.clear();
+      _startWatchdog();
       Sound.I.gameMusic();
       notifyListeners();
       _scheduleBot();
@@ -197,9 +269,34 @@ class GameController extends ChangeNotifier {
     await p.remove(_kSaved);
   }
 
+  // --- watchdog -----------------------------------------------------------------
+  /// The watchdog owns liveness: every 2s it audits the turn state machine.
+  /// The only recoverable stall is "bot to move with nothing in flight"
+  /// (a dropped timer, e.g. across an app-background race); in that case it
+  /// re-schedules the bot turn and counts the recovery. All other states
+  /// either have a live timer or are human-driven.
+  void _startWatchdog() {
+    _watchdog?.cancel();
+    if (_disposed) return;
+    _watchdog = Timer.periodic(const Duration(seconds: 2), (_) {
+      _watchdogTick();
+    });
+  }
+
+  void _watchdogTick() {
+    if (_disposed || gameOver || paused || !_inGame) return;
+    // Invariant audit: turn is always a valid seat.
+    assert(snap.turn == 0 || snap.turn == 1, 'corrupt turn ${snap.turn}');
+    if (!isBotTurn) return;
+    if (_botStage == BotStage.idle) {
+      watchdogRecoveries++;
+      _scheduleBot();
+    }
+  }
+
   // --- human input --------------------------------------------------------------
   void tapPoint(int i) {
-    if (gameOver || paused || isBotTurn) return;
+    if (gameOver || paused || isBotTurn || botBusy) return;
     Sound.I.select();
     if (capturePending) {
       if (captureTargets.contains(i)) {
@@ -245,6 +342,7 @@ class GameController extends ChangeNotifier {
   void _beginHumanPly(int from, int to) {
     final preview = _preview(from, to);
     lastPlaced = to;
+    lastFrom = from;
     selected = -1;
     hintFrom = null;
     hintTo = null;
@@ -270,6 +368,7 @@ class GameController extends ChangeNotifier {
 
   /// Applies the (possibly capture-resolved) ply through the pure engine.
   void _finalizePly(PendingPly ply, int capture) {
+    botPreview = null;
     _history.add(snap);
     final mover = snap.turn;
     final wasFlying = ply.from != -1 &&
@@ -318,41 +417,115 @@ class GameController extends ChangeNotifier {
     return PendingPly(from, to, b, r, formed);
   }
 
-  // --- bot -----------------------------------------------------------------------
+  // --- bot: fully visible staged turns --------------------------------------------
   void _scheduleBot() {
-    if (!isBotTurn || gameOver || _botScheduled) return;
-    _botScheduled = true;
+    if (!isBotTurn || gameOver || _botStage != BotStage.idle || !_inGame) {
+      return;
+    }
+    _botStage = BotStage.scheduled;
     final id = _gameId;
-    Future.delayed(const Duration(milliseconds: 850), () {
-      _botScheduled = false;
-      if (id != _gameId || !isBotTurn || gameOver || paused) return;
+    Future.delayed(const Duration(milliseconds: 700), () {
+      if (id != _gameId || _disposed) {
+        _botStage = BotStage.idle;
+        return;
+      }
+      if (!isBotTurn || gameOver || paused) {
+        // Turn conditions changed (undo/pause/quit): release the stage so the
+        // watchdog or the next legitimate trigger can re-schedule.
+        _botStage = BotStage.idle;
+        notifyListeners();
+        return;
+      }
+      _botThink();
+    });
+  }
+
+  void _botThink() {
+    final id = _gameId;
+    final p = turn;
+    _botStage = BotStage.thinking;
+    botNarrative = '${seatName(p)} studies the stones…';
+    botFrom = -1;
+    botTo = -1;
+    botPreview = null;
+    botCaptureAt = -1;
+    notifyListeners();
+    Future.delayed(const Duration(milliseconds: 650), () {
+      if (id != _gameId || _disposed) {
+        _botStage = BotStage.idle;
+        return;
+      }
+      if (!isBotTurn || gameOver || paused) {
+        _botStage = BotStage.idle;
+        botNarrative = '';
+        notifyListeners();
+        return;
+      }
       _botAct();
     });
   }
 
   void _botAct() {
     final p = turn;
+    final name = seatName(p);
     final m = MorrisAi.chooseMove(board, reserve, p, difficulty, _rng);
-    if (m[0] == -1 && m[1] == -1) return; // no moves; engine ends game on next check
-    final preview = _preview(m[0], m[1]);
-    lastPlaced = m[1];
-    selected = -1;
-    if (preview.formedMill) {
-      // Brief beat so the mill flash reads before the capture lands.
-      millFlash = _millPoints(preview.board, p);
-      Sound.I.mill();
+    if (m[0] == -1 && m[1] == -1) {
+      // Unreachable: blocked losses are declared by the engine at the end of
+      // the previous ply, so a bot never faces zero moves. Release cleanly.
+      _botStage = BotStage.idle;
+      botNarrative = '';
       notifyListeners();
-      final id = _gameId;
-      Future.delayed(const Duration(milliseconds: 650), () {
-        if (id != _gameId || gameOver) return;
-        final cap = MorrisAi.chooseCapture(preview.board, p, difficulty, _rng);
-        lastCaptured = cap;
-        Sound.I.capture();
-        _finalizePly(preview, cap);
-      });
-    } else {
-      _finalizePly(preview, -1);
+      return;
     }
+    final preview = _preview(m[0], m[1]);
+    _botStage = BotStage.acting;
+    botPreview = preview;
+    botFrom = m[0];
+    botTo = m[1];
+    lastPlaced = m[1];
+    lastFrom = m[0];
+    selected = -1;
+    botNarrative = m[0] == -1
+        ? '$name sets a man upon the stone…'
+        : (MorrisEngine.isFlying(board, reserve, p)
+            ? '$name takes flight across the board…'
+            : '$name slides a man along the carved line…');
+    Sound.I.select();
+    notifyListeners();
+    final id = _gameId;
+    // Visible beat: the move sits on the board before anything else happens.
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (id != _gameId || _disposed || gameOver) return;
+      if (preview.formedMill) {
+        _botStage = BotStage.capturing;
+        final cap = MorrisAi.chooseCapture(preview.board, p, difficulty, _rng);
+        botCaptureAt = cap;
+        millFlash = _millPoints(preview.board, p);
+        botNarrative = 'MILL! $name seizes a rival man…';
+        Sound.I.mill();
+        notifyListeners();
+        // Visible beat: the doomed man is highlighted before it is removed.
+        Future.delayed(const Duration(milliseconds: 850), () {
+          if (id != _gameId || _disposed || gameOver) return;
+          _botStage = BotStage.idle;
+          botPreview = null;
+          botFrom = -1;
+          botTo = -1;
+          botCaptureAt = -1;
+          botNarrative = '';
+          lastCaptured = cap;
+          Sound.I.capture();
+          _finalizePly(preview, cap);
+        });
+      } else {
+        _botStage = BotStage.idle;
+        botPreview = null;
+        botFrom = -1;
+        botTo = -1;
+        botNarrative = '';
+        _finalizePly(preview, -1);
+      }
+    });
   }
 
   // --- undo / hint -----------------------------------------------------------------
@@ -373,6 +546,7 @@ class GameController extends ChangeNotifier {
     pending = null;
     selected = -1;
     lastPlaced = -1;
+    lastFrom = -1;
     lastCaptured = -1;
     millFlash = {};
     if (_evalHistory.isNotEmpty) _evalHistory.removeLast();
@@ -382,7 +556,7 @@ class GameController extends ChangeNotifier {
   }
 
   void hint() {
-    if (gameOver || paused || isBotTurn || capturePending) return;
+    if (gameOver || paused || isBotTurn || capturePending || botBusy) return;
     final m = MorrisAi.chooseMove(board, reserve, turn, Difficulty.medium, _rng);
     if (m[1] == -1) return;
     hintFrom = m[0];
@@ -427,6 +601,7 @@ class GameController extends ChangeNotifier {
     paused = true;
     _saveGame();
     Sound.I.duckMusic();
+    Sound.I.onLifecyclePause();
     notifyListeners();
   }
 
@@ -434,19 +609,33 @@ class GameController extends ChangeNotifier {
     if (!paused) return;
     paused = false;
     Sound.I.unduckMusic();
+    Sound.I.onLifecycleResume();
     notifyListeners();
     _scheduleBot();
   }
 
   void quitToMenu() {
     _gameId++;
+    _botStage = BotStage.idle;
+    botNarrative = '';
+    _inGame = false;
     _saveGame();
     Sound.I.menuMusic();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _gameId++;
+    _watchdog?.cancel();
+    super.dispose();
   }
 
   // --- game end ------------------------------------------------------------------------------
   void _finishGame(String win, String? reason) {
     _gameId++;
+    _botStage = BotStage.idle;
+    botNarrative = '';
     winner = win;
     endReason = reason;
     pending = null;
@@ -502,7 +691,7 @@ class GameController extends ChangeNotifier {
     if (mode == GameMode.vsAi) {
       return winner == '$humanSeat' ? 'Victory' : 'Defeat';
     }
-    return 'Player ${int.parse(winner!) + 1} Wins';
+    return '${seatName(int.parse(winner!))} Wins';
   }
 
   String endReasonLabel() {

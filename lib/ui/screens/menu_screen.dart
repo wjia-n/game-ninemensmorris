@@ -6,7 +6,9 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../audio/sound.dart';
+import '../../services/iap_service.dart';
 import '../../state/game_controller.dart';
+import '../../state/settings.dart';
 import '../../state/stats.dart';
 import '../board_painter.dart';
 import '../lapidary.dart';
@@ -14,7 +16,8 @@ import '../widgets.dart';
 
 class MenuScreen extends StatefulWidget {
   final GameController controller;
-  const MenuScreen({super.key, required this.controller});
+  final StoreService store;
+  const MenuScreen({super.key, required this.controller, required this.store});
 
   @override
   State<MenuScreen> createState() => _MenuScreenState();
@@ -61,17 +64,47 @@ class _MenuScreenState extends State<MenuScreen>
                     fontSize: 34,
                   ),
                   const SizedBox(height: 14),
-                  // Decorative board vignette.
+                  // Game logo + decorative board vignette.
                   Container(
                     constraints: const BoxConstraints(maxWidth: 300),
-                    child: AspectRatio(
-                      aspectRatio: 1,
-                      child: AnimatedBuilder(
-                        animation: _pulse,
-                        builder: (_, _) => CustomPaint(
-                          painter: BoardPainter.decorative(pulse: _pulse.value),
+                    child: Stack(
+                      children: [
+                        AspectRatio(
+                          aspectRatio: 1,
+                          child: AnimatedBuilder(
+                            animation: _pulse,
+                            builder: (_, _) => CustomPaint(
+                              painter: BoardPainter.decorative(
+                                  pulse: _pulse.value),
+                            ),
+                          ),
                         ),
-                      ),
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: Container(
+                            width: 84,
+                            height: 84,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                  color: Lapidary.bronzeLight, width: 2),
+                              boxShadow: [
+                                BoxShadow(
+                                  color:
+                                      Colors.black.withValues(alpha: 0.5),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: Image.asset(
+                                'assets/ninemensmorris_logo.png',
+                                fit: BoxFit.cover),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 18),
@@ -108,6 +141,28 @@ class _MenuScreenState extends State<MenuScreen>
                     sublabel: 'SOUND · MUSIC · DIFFICULTY',
                     fontSize: 16,
                     onTap: () => Navigator.of(context).pushNamed('/settings'),
+                  ),
+                  const SizedBox(height: 10),
+                  BronzeTablet(
+                    label: 'CUSTOMIZE',
+                    sublabel: 'NAMES · THEMES · PIECES',
+                    fontSize: 16,
+                    onTap: () =>
+                        Navigator.of(context).pushNamed('/customize'),
+                  ),
+                  const SizedBox(height: 10),
+                  AnimatedBuilder(
+                    animation: SettingsStore.I,
+                    builder: (_, _) => BronzeTablet(
+                      label: SettingsStore.I.proUnlocked
+                          ? 'PRO ACTIVE'
+                          : 'MORRIS PRO',
+                      sublabel: 'FREE VS PRO · TIP JAR',
+                      fontSize: 16,
+                      selected: SettingsStore.I.proUnlocked,
+                      onTap: () =>
+                          Navigator.of(context).pushNamed('/pro'),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   if (stats.gamesPlayed > 0)

@@ -12,6 +12,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../engine/morris.dart';
+import '../theme/morris_themes.dart';
 import 'lapidary.dart';
 
 class BoardPainter extends CustomPainter {
@@ -28,6 +29,25 @@ class BoardPainter extends CustomPainter {
   final int? hintTo;
   final bool interactive;
 
+  /// Carved-stone theme (null = the default Lapidary palette).
+  final MorrisTheme? theme;
+
+  /// Piece style (null = classic disc).
+  final PieceStyle? pieceStyle;
+
+  /// Board accent (null = verdigris default).
+  final BoardAccent? accent;
+
+  /// Slide animation: origin of a moving token (drawn as a fading trail).
+  final int slideFrom;
+
+  /// Capture staging: the doomed man, ringed before removal.
+  final int doomedIdx;
+
+  MorrisTheme get _t => theme ?? morrisThemes.first;
+  PieceStyle get _ps => pieceStyle ?? pieceStyles.first;
+  BoardAccent get _a => accent ?? boardAccents.first;
+
   BoardPainter({
     super.repaint,
     required this.board,
@@ -42,6 +62,11 @@ class BoardPainter extends CustomPainter {
     required this.hintFrom,
     required this.hintTo,
     this.interactive = true,
+    this.theme,
+    this.pieceStyle,
+    this.accent,
+    this.slideFrom = -1,
+    this.doomedIdx = -1,
   });
 
   /// Demo arrangement for the menu vignette (non-interactive).
@@ -106,7 +131,9 @@ class BoardPainter extends CustomPainter {
     _paintSockets(canvas, size);
     _paintMoveTargets(canvas, size);
     _paintHint(canvas, size);
+    _paintSlideTrail(canvas, size);
     _paintTokens(canvas, size);
+    _paintDoomed(canvas, size);
     _paintMillFlash(canvas, size);
   }
 
@@ -120,8 +147,7 @@ class BoardPainter extends CustomPainter {
             (Offset.zero & size).shift(const Offset(0, 14)),
             const Radius.circular(18)),
         Paint()..color = Colors.black.withValues(alpha: 0.5));
-    Lapidary.paintSlab(canvas, slabRect,
-        base: Lapidary.sandstone, bevel: 8);
+    Lapidary.paintSlab(canvas, slabRect, base: _t.sandstone, bevel: 8);
 
     // Weathering: soft tonal blotches baked into the stone.
     final rng = Random(42);
@@ -134,7 +160,7 @@ class BoardPainter extends CustomPainter {
           Offset(cx, cy),
           cr,
           Paint()
-            ..color = (dark ? Lapidary.bronzeDark : Lapidary.sandstoneLight)
+            ..color = (dark ? _t.bronzeDark : _t.sandstoneLight)
                 .withValues(alpha: 0.05)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 18));
     }
@@ -146,10 +172,9 @@ class BoardPainter extends CustomPainter {
           Offset(cx, cy),
           0.8 + rng.nextDouble() * 1.4,
           Paint()
-            ..color = (rng.nextBool()
-                    ? Lapidary.bronzeDark
-                    : Lapidary.sandstoneLight)
-                .withValues(alpha: 0.10));
+            ..color =
+                (rng.nextBool() ? _t.bronzeDark : _t.sandstoneLight)
+                    .withValues(alpha: 0.10));
     }
     // Pitting: tiny dark chips.
     for (var k = 0; k < 36; k++) {
@@ -185,14 +210,14 @@ class BoardPainter extends CustomPainter {
             a + const Offset(-2.2, -2.2),
             b + const Offset(-2.2, -2.2),
             Paint()
-              ..color = Lapidary.sandstoneLight.withValues(alpha: 0.55)
+              ..color = _t.sandstoneLight.withValues(alpha: 0.55)
               ..strokeWidth = 9
               ..strokeCap = StrokeCap.round);
         canvas.drawLine(
             a,
             b,
             Paint()
-              ..color = const Color(0xFF3A2C1C)
+              ..color = _t.grooveDark
               ..strokeWidth = 8
               ..strokeCap = StrokeCap.round);
         canvas.drawLine(
@@ -218,14 +243,14 @@ class BoardPainter extends CustomPainter {
           r * 0.62,
           Paint()..color = Colors.black.withValues(alpha: 0.28));
       canvas.drawCircle(
-          c, r * 0.58, Paint()..color = const Color(0xFF2E2115));
+          c, r * 0.58, Paint()..color = _t.socketDeep);
       canvas.drawCircle(
           c + const Offset(-1.5, -1.5),
           r * 0.58,
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2
-            ..color = Lapidary.sandstoneLight.withValues(alpha: 0.5));
+            ..color = _t.sandstoneLight.withValues(alpha: 0.5));
       canvas.drawCircle(
           c, r * 0.40, Paint()..color = Lapidary.umber.withValues(alpha: 0.55));
     }
@@ -241,10 +266,10 @@ class BoardPainter extends CustomPainter {
           c,
           r + 4,
           Paint()
-            ..color = Lapidary.verdigris.withValues(alpha: 0.25 * glow)
+            ..color = _a.moveTarget.withValues(alpha: 0.25 * glow)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
       canvas.drawCircle(
-          c, r, Paint()..color = Lapidary.verdigris.withValues(alpha: glow));
+          c, r, Paint()..color = _a.moveTarget.withValues(alpha: glow));
       canvas.drawCircle(
           c + const Offset(-1, -1),
           r * 0.45,
@@ -262,7 +287,7 @@ class BoardPainter extends CustomPainter {
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 3
-            ..color = Lapidary.verdigris.withValues(alpha: 0.9));
+            ..color = _a.millFlash.withValues(alpha: 0.9));
     }
     if (hintTo != null && hintTo! >= 0) {
       final c = pointAt(hintTo!, size);
@@ -272,7 +297,7 @@ class BoardPainter extends CustomPainter {
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 3
-            ..color = Lapidary.bronzeLight.withValues(alpha: 0.9));
+            ..color = _t.bronzeLight.withValues(alpha: 0.9));
     }
   }
 
@@ -307,23 +332,25 @@ class BoardPainter extends CustomPainter {
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 4
-              ..color = Lapidary.bronzeLight.withValues(alpha: glow));
+              ..color = _t.bronzeLight.withValues(alpha: glow));
         canvas.drawCircle(
             c,
             rr + 13,
             Paint()
               ..style = PaintingStyle.stroke
               ..strokeWidth = 2
-              ..color = Lapidary.verdigris.withValues(alpha: glow * 0.7));
+              ..color = _a.millFlash.withValues(alpha: glow * 0.7));
       }
     }
   }
 
   /// One physical token: contact shadow, lit disc, bevel, engraved rings,
-  /// patina (bronze) and a raised center boss.
+  /// patina (bronze) and a raised center boss — in the active carved-stone
+  /// theme and piece style.
   void _paintToken(Canvas canvas, Offset c, double r, int seat,
       {double shadowScale = 1.0, double shadowAlpha = 0.38}) {
     final bronze = seat == 0;
+    final ps = _ps;
     // Contact shadow with ambient occlusion closest to the token.
     canvas.drawCircle(
         c + Offset(r * 0.22 * shadowScale, r * 0.42 * shadowScale),
@@ -338,81 +365,121 @@ class BoardPainter extends CustomPainter {
           ..color = Colors.black.withValues(alpha: shadowAlpha * 0.7)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
 
-    // Lit disc.
-    final discRect = Rect.fromCircle(center: c, radius: r);
-    canvas.drawCircle(
-        c,
-        r,
-        Paint()
-          ..shader = RadialGradient(
-            center: const Alignment(-0.45, -0.55),
-            radius: 1.15,
-            colors: bronze
-                ? const [
-                    Color(0xFFD9A860),
-                    Lapidary.bronze,
-                    Color(0xFF4A2F18),
-                  ]
-                : const [
-                    Color(0xFFF2E8D6),
-                    Lapidary.bone,
-                    Color(0xFF7E7263),
-                  ],
-            stops: const [0.0, 0.55, 1.0],
-          ).createShader(discRect));
+    final light = bronze ? _t.bronzeLight : const Color(0xFFF2E8D6);
+    final mid = bronze ? _t.bronze : _t.bone;
+    final dark = bronze ? _t.bronzeDark : _t.boneDark;
 
-    // Rim bevel: lit upper-left arc, shadowed lower-right arc.
-    canvas.drawArc(
-        discRect, pi * 0.75, pi * 1.1, false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = r * 0.14
-          ..strokeCap = StrokeCap.round
-          ..color = (bronze ? Colors.white : Colors.white)
-              .withValues(alpha: 0.30));
-    canvas.drawArc(
-        discRect.deflate(r * 0.07), -pi * 0.25, pi * 1.1, false,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = r * 0.12
-          ..strokeCap = StrokeCap.round
-          ..color = Colors.black.withValues(alpha: 0.35));
-
-    // Concentric engraved rings.
-    final ringColor =
-        (bronze ? Lapidary.bronzeDark : Lapidary.boneDark)
-            .withValues(alpha: 0.75);
-    for (final rr in [0.66, 0.44]) {
+    // Token body: disc, hexagon-cut stone, or square stele per piece style.
+    Path? shapePath;
+    if (ps.hex || ps.square) {
+      shapePath = Path();
+      final n = ps.hex ? 6 : 4;
+      final rot = ps.hex ? -pi / 6 : -pi / 4;
+      for (var k = 0; k < n; k++) {
+        final a = rot + k * 2 * pi / n;
+        final p = c + Offset(cos(a) * r, sin(a) * r);
+        if (k == 0) {
+          shapePath.moveTo(p.dx, p.dy);
+        } else {
+          shapePath.lineTo(p.dx, p.dy);
+        }
+      }
+      shapePath.close();
+      canvas.drawPath(
+          shapePath,
+          Paint()
+            ..shader = RadialGradient(
+              center: const Alignment(-0.45, -0.55),
+              radius: 1.15,
+              colors: [light, mid, dark],
+              stops: const [0.0, 0.55, 1.0],
+            ).createShader(Rect.fromCircle(center: c, radius: r)));
+    } else {
+      // Lit disc.
+      final discRect = Rect.fromCircle(center: c, radius: r);
       canvas.drawCircle(
           c,
-          r * rr,
+          r,
+          Paint()
+            ..shader = RadialGradient(
+              center: const Alignment(-0.45, -0.55),
+              radius: 1.15,
+              colors: [light, mid, dark],
+              stops: const [0.0, 0.55, 1.0],
+            ).createShader(discRect));
+
+      // Rim bevel: lit upper-left arc, shadowed lower-right arc.
+      canvas.drawArc(
+          discRect, pi * 0.75, pi * 1.1, false,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = r * 0.14
+            ..strokeCap = StrokeCap.round
+            ..color = Colors.white.withValues(alpha: 0.30));
+      canvas.drawArc(
+          discRect.deflate(r * 0.07), -pi * 0.25, pi * 1.1, false,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = r * 0.12
+            ..strokeCap = StrokeCap.round
+            ..color = Colors.black.withValues(alpha: 0.35));
+    }
+
+    // Engraving: concentric rings or a carved spiral.
+    final ringColor = dark.withValues(alpha: 0.75);
+    if (ps.spiral) {
+      final path = Path();
+      for (var a = 0.0; a < 12.5; a += 0.2) {
+        final rr = r * 0.12 + (a / 12.5) * r * 0.60;
+        final p = c + Offset(cos(a) * rr, sin(a) * rr);
+        if (a == 0) {
+          path.moveTo(p.dx, p.dy);
+        } else {
+          path.lineTo(p.dx, p.dy);
+        }
+      }
+      canvas.drawPath(
+          path,
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = max(1.2, r * 0.045)
             ..color = ringColor);
-      canvas.drawCircle(
-          c + const Offset(-1, -1),
-          r * rr,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1
-            ..color = Colors.white.withValues(alpha: 0.18));
+    } else {
+      for (var k = 1; k <= ps.ringCount; k++) {
+        final rr = r * (0.24 + 0.22 * k);
+        if (rr >= r * 0.92) continue;
+        canvas.drawCircle(
+            c,
+            rr,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = max(1.2, r * 0.045)
+              ..color = ringColor);
+        canvas.drawCircle(
+            c + const Offset(-1, -1),
+            rr,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1
+              ..color = Colors.white.withValues(alpha: 0.18));
+      }
     }
 
     // Verdigris patina blooms on bronze.
-    if (bronze) {
+    if (bronze && ps.patina > 0) {
       final rng = Random(7);
-      for (var k = 0; k < 4; k++) {
+      final blooms = (2 + ps.patina * 4).round();
+      for (var k = 0; k < blooms; k++) {
         final a = rng.nextDouble() * 2 * pi;
         final d = r * (0.45 + rng.nextDouble() * 0.35);
         canvas.drawCircle(
             c + Offset(cos(a) * d, sin(a) * d),
             r * (0.10 + rng.nextDouble() * 0.10),
             Paint()
-              ..color = Lapidary.verdigris.withValues(alpha: 0.42)
+              ..color = _t.verdigris.withValues(alpha: 0.42 * ps.patina)
               ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2));
       }
-    } else {
+    } else if (!bronze) {
       // Bone grain: faint carved striations.
       final rng = Random(11);
       for (var k = 0; k < 5; k++) {
@@ -422,27 +489,74 @@ class BoardPainter extends CustomPainter {
             c + Offset(cos(a) * r * 0.8, sin(a) * r * 0.8),
             Paint()
               ..strokeWidth = 1
-              ..color = Lapidary.boneDark.withValues(alpha: 0.25));
+              ..color = dark.withValues(alpha: 0.25));
       }
     }
 
     // Raised center boss catching the spotlight.
-    final bossR = r * 0.20;
-    canvas.drawCircle(
-        c + Offset(0, bossR * 0.35),
-        bossR,
-        Paint()..color = Colors.black.withValues(alpha: 0.30));
+    if (ps.bossScale > 0) {
+      final bossR = r * 0.20 * ps.bossScale;
+      canvas.drawCircle(
+          c + Offset(0, bossR * 0.35),
+          bossR,
+          Paint()..color = Colors.black.withValues(alpha: 0.30));
+      canvas.drawCircle(
+          c,
+          bossR,
+          Paint()
+            ..shader = RadialGradient(
+              center: const Alignment(-0.4, -0.5),
+              radius: 1.0,
+              colors: [light, dark],
+            ).createShader(Rect.fromCircle(center: c, radius: bossR)));
+    }
+  }
+
+  /// Slide trail: a fading ghost from the move origin to the destination,
+  /// so bot (and human) slides read as physical motion, not teleportation.
+  void _paintSlideTrail(Canvas canvas, Size size) {
+    if (slideFrom < 0 || slideFrom >= 24) return;
+    final to = popIdx;
+    if (to < 0 || to >= 24 || board[to] == -1) return;
+    final a = pointAt(slideFrom, size);
+    final b = pointAt(to, size);
+    final r = tokenRadius(size);
+    final steps = 5;
+    for (var k = 1; k <= steps; k++) {
+      final t = k / (steps + 1);
+      final p = Offset(
+        a.dx + (b.dx - a.dx) * t,
+        a.dy + (b.dy - a.dy) * t,
+      );
+      canvas.drawCircle(
+          p,
+          r * 0.55 * (1 - t * 0.5),
+          Paint()
+            ..color = _a.moveTarget.withValues(alpha: 0.16 * (1 - t)));
+    }
+  }
+
+  /// The doomed man (bot capture staging): a pulsing warning ring before the
+  /// piece is lifted off the stone.
+  void _paintDoomed(Canvas canvas, Size size) {
+    if (doomedIdx < 0 || doomedIdx >= 24 || board[doomedIdx] == -1) return;
+    final c = pointAt(doomedIdx, size);
+    final r = tokenRadius(size);
+    final glow = 0.55 + 0.45 * sin(pulse * 2 * pi);
     canvas.drawCircle(
         c,
-        bossR,
+        r + 8,
         Paint()
-          ..shader = RadialGradient(
-            center: const Alignment(-0.4, -0.5),
-            radius: 1.0,
-            colors: bronze
-                ? const [Color(0xFFE0B268), Lapidary.bronzeDark]
-                : const [Color(0xFFFFF6E6), Lapidary.boneDark],
-          ).createShader(Rect.fromCircle(center: c, radius: bossR)));
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 5
+          ..color = const Color(0xFF9A3A2A).withValues(alpha: glow));
+    canvas.drawCircle(
+        c,
+        r + 14,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = const Color(0xFF9A3A2A).withValues(alpha: glow * 0.6));
   }
 
   // --- mill flash ----------------------------------------------------------------------
@@ -459,12 +573,12 @@ class BoardPainter extends CustomPainter {
           Paint()
             ..style = PaintingStyle.stroke
             ..strokeWidth = 4
-            ..color = Lapidary.verdigris.withValues(alpha: glow));
+            ..color = _a.millFlash.withValues(alpha: glow));
       canvas.drawCircle(
           c,
           r + 12,
           Paint()
-            ..color = Lapidary.verdigris.withValues(alpha: 0.14 * glow)
+            ..color = _a.millFlash.withValues(alpha: 0.14 * glow)
             ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
     }
   }

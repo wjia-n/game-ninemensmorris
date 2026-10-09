@@ -10,9 +10,12 @@ import 'package:flutter/material.dart';
 import '../../audio/sound.dart';
 import '../../engine/engine.dart';
 import '../../state/game_controller.dart';
+import '../../state/settings.dart';
+import '../../theme/morris_themes.dart';
 import '../board_painter.dart';
 import '../lapidary.dart';
 import '../widgets.dart';
+import '../widgets/trays.dart';
 
 class GameScreen extends StatefulWidget {
   final GameController controller;
@@ -90,6 +93,11 @@ class _GameScreenState extends State<GameScreen>
                   Column(
                     children: [
                       _statusPanel(),
+                      const SizedBox(height: 6),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: SideTrays(controller: _c),
+                      ),
                       Expanded(child: _board()),
                       _hintStrip(),
                       _toolbar(),
@@ -118,10 +126,15 @@ class _GameScreenState extends State<GameScreen>
         child: Row(
           children: [
             ReserveChip(
-                count: _c.reserve[0], seat: 0, label: 'BRONZE · $bronzeMen'),
+                count: _c.reserve[0],
+                seat: 0,
+                label:
+                    '${_c.seatName(0).toUpperCase()} · $bronzeMen'),
             Expanded(child: _turnBanner()),
             ReserveChip(
-                count: _c.reserve[1], seat: 1, label: 'BONE · $boneMen'),
+                count: _c.reserve[1],
+                seat: 1,
+                label: '${_c.seatName(1).toUpperCase()} · $boneMen'),
           ],
         ),
       ),
@@ -136,10 +149,15 @@ class _GameScreenState extends State<GameScreen>
     } else if (_c.capturePending) {
       label = 'MILL!';
       accent = Lapidary.verdigris;
+    } else if (_c.botBusy && _c.botNarrative.isNotEmpty) {
+      label = _c.seatName(_c.turn).toUpperCase();
+      accent = Lapidary.verdigris;
     } else if (_c.mode == GameMode.vsAi) {
-      label = _c.turn == _c.humanSeat ? 'YOUR TURN' : 'STONE MIND';
+      label = _c.turn == _c.humanSeat
+          ? '${_c.seatName(_c.turn).toUpperCase()} · YOUR TURN'
+          : _c.seatName(_c.turn).toUpperCase();
     } else {
-      label = _c.turn == 0 ? 'BRONZE TO MOVE' : 'BONE TO MOVE';
+      label = '${_c.seatName(_c.turn).toUpperCase()} TO MOVE';
     }
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -195,6 +213,12 @@ class _GameScreenState extends State<GameScreen>
                   pulse: _pulse.value,
                   hintFrom: _c.hintFrom,
                   hintTo: _c.hintTo,
+                  theme: SettingsStore.I.activeTheme,
+                  pieceStyle:
+                      pieceStyleById(SettingsStore.I.pieceStyleId),
+                  accent: boardAccentById(SettingsStore.I.accentId),
+                  slideFrom: _c.lastFrom,
+                  doomedIdx: _c.botCaptureAt,
                 ),
               ),
             ),

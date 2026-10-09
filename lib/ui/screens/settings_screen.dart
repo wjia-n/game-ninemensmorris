@@ -99,6 +99,23 @@ class SettingsScreen extends StatelessWidget {
                           const SizedBox(height: 14),
                           const EngravedDivider(),
                           BronzeTablet(
+                            label: 'CUSTOMIZE',
+                            sublabel: 'NAMES · THEMES · PIECES',
+                            fontSize: 14,
+                            onTap: () =>
+                                Navigator.of(context).pushNamed('/customize'),
+                          ),
+                          const SizedBox(height: 10),
+                          BronzeTablet(
+                            label: 'MORRIS PRO',
+                            sublabel: 'FREE VS PRO · TIP JAR',
+                            fontSize: 14,
+                            onTap: () =>
+                                Navigator.of(context).pushNamed('/pro'),
+                          ),
+                          const SizedBox(height: 14),
+                          const EngravedDivider(),
+                          BronzeTablet(
                             label: 'RESET STATISTICS',
                             fontSize: 14,
                             onTap: () => StatsStore.I.reset(),

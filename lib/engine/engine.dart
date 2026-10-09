@@ -186,17 +186,64 @@ class MorrisEngine {
     int capturedAt = -1;
     if (formedMill) {
       final targets = captureTargets(board, p);
-      capturedAt = capture; // caller picks a legal target
-      assert(targets.contains(capturedAt), 'illegal capture target');
+      if (targets.isEmpty) {
+        // Unreachable by legal play (a mill implies the foe holds a man),
+        // but never corrupt state: treat as no capture rather than crash.
+        return _completePly(
+            s,
+            board,
+            reserve,
+            p,
+            1 - p,
+            formedMill,
+            -1,
+            List<String>.from(s.positionHistory),
+            s.pliesNoProgress);
+      }
+      if (!targets.contains(capture)) {
+        throw StateError(
+            'MorrisEngine.applyPly: illegal capture target $capture for player $p '
+            '(legal: $targets). Mill was newly formed; the caller must pick a '
+            'legal target from captureTargets().');
+      }
+      capturedAt = capture;
       board[capturedAt] = -1;
     }
 
     final foe = 1 - p;
+
+    // Draw bookkeeping (only meaningful in the movement phase).
+    var noProgress = s.pliesNoProgress;
+    if (placementDone(reserve)) {
+      noProgress = (formedMill || capturedAt != -1) ? 0 : noProgress + 1;
+    }
+    final history = List<String>.from(s.positionHistory);
+
+    return _completePly(s, board, reserve, p, foe, formedMill, capturedAt,
+        history, noProgress);
+  }
+
+  /// Shared tail of [applyPly]: win/draw checks, draw bookkeeping, snapshot.
+  /// `history` and `noProgress` are the already-updated movement-phase
+  /// bookkeeping (no-op during placement).
+  static PlyResult _completePly(
+      MorrisSnapshot s,
+      List<int> board,
+      List<int> reserve,
+      int p,
+      int foe,
+      bool formedMill,
+      int capturedAt,
+      List<String> history,
+      int noProgress) {
     final foeCount = pieceCount(board, foe);
-    final foeMoves = placementDone(reserve) ? legalMoves(board, reserve, foe) : null;
+    final foeMoves =
+        placementDone(reserve) ? legalMoves(board, reserve, foe) : null;
 
     String? winner; // '0' | '1' | 'draw' | null
     String? endReason;
+    // RULES.md §7 check order: (a) opponent at 2 men → win; (b) no legal move.
+    // Reduction can only result from a capture, which implies a mill.
     if (formedMill && placementDone(reserve) && foeCount <= 2) {
       winner = '$p';
       endReason = 'reduction';
@@ -205,12 +252,6 @@ class MorrisEngine {
       endReason = 'blocked';
     }
 
-    // Draw bookkeeping (only meaningful in the movement phase).
-    var noProgress = s.pliesNoProgress;
-    if (placementDone(reserve)) {
-      noProgress = (formedMill || capturedAt != -1) ? 0 : noProgress + 1;
-    }
-    final history = List<String>.from(s.positionHistory);
     String? drawBy;
     if (winner == null && placementDone(reserve)) {
       final key = positionKey(board, foe);
@@ -248,6 +289,7 @@ class MorrisEngine {
       endReason: endReason ?? drawBy,
     );
   }
+
 }
 
 /// Outcome of one completed ply.
