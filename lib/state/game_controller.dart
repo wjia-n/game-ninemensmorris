@@ -1,0 +1,524 @@
+/// Game flow controller: turns, selection, captures, bot scheduling, undo,
+/// hints, draws, pause/resume, persistence and statistics.
+///
+/// The rules themselves live in [MorrisEngine] (pure); this class owns the
+/// mutable match state and the human/bot interaction loop. Notifies listeners
+/// on every state change so the carved-stone UI can animate.
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../audio/sound.dart';
+import '../engine/ai.dart';
+import '../engine/engine.dart';
+import '../engine/morris.dart';
+import 'settings.dart';
+import 'stats.dart';
+
+enum GameMode { vsAi, twoPlayer }
+
+class PendingPly {
+  final int from;
+  final int to;
+  final List<int> board; // board with the move applied, capture unresolved
+  final List<int> reserve;
+  final bool formedMill;
+  const PendingPly(this.from, this.to, this.board, this.reserve, this.formedMill);
+}
+
+class GameController extends ChangeNotifier {
+  GameController();
+
+  final Random _rng = Random();
+  int _gameId = 0;
+  bool _botScheduled = false;
+
+  // --- match config ----------------------------------------------------------
+  GameMode mode = GameMode.vsAi;
+  Difficulty difficulty = Difficulty.medium;
+  int humanSeat = 0; // which seat the human plays in vsAi
+
+  // --- match state ------------------------------------------------------------
+  MorrisSnapshot snap = MorrisSnapshot.initial();
+  final List<MorrisSnapshot> _history = [];
+  PendingPly? pending; // human formed a mill, awaiting capture pick
+  int selected = -1;
+  String? winner; // '0' | '1' | 'draw'
+  String? endReason; // 'reduction' | 'blocked' | 'repetition' | 'no-progress' | 'agreement' | 'resign'
+  bool paused = false;
+  DateTime? _startedAt;
+
+  // --- animation / feedback transients ----------------------------------------
+  int lastPlaced = -1;
+  int lastCaptured = -1;
+  Set<int> millFlash = {};
+  int? hintFrom;
+  int? hintTo;
+
+  /// Fired once when the game ends (UI navigates to the game-over screen).
+  VoidCallback? onGameOver;
+
+  static const _kSaved = 'nmm_saved_game_v1';
+
+  // --- derived -----------------------------------------------------------------
+  int get turn => snap.turn;
+  List<int> get board => pending?.board ?? snap.board;
+  List<int> get reserve => pending?.reserve ?? snap.reserve;
+  bool get gameOver => winner != null;
+  bool get capturePending => pending != null;
+  bool get isBotTurn =>
+      !gameOver && mode == GameMode.vsAi && turn != humanSeat;
+  bool get inPlacement => reserve[turn] > 0;
+  bool get canUndo =>
+      !gameOver && !isBotTurn && !capturePending && _history.isNotEmpty;
+  bool get placementDone => MorrisEngine.placementDone(snap.reserve);
+  bool get flyingTurn => MorrisEngine.isFlying(board, reserve, turn);
+
+  List<int> get captureTargets =>
+      capturePending ? MorrisEngine.captureTargets(board, turn) : const [];
+
+  List<int> get moveTargets => (selected == -1 || capturePending || gameOver)
+      ? const []
+      : MorrisEngine.destinationsFrom(board, reserve, turn, selected);
+
+  String phaseLabel() {
+    if (gameOver) return '';
+    if (capturePending) return 'MILL! Choose an enemy man to capture';
+    if (reserve[turn] > 0) {
+      return 'PLACING · ${reserve[turn]} in reserve';
+    }
+    if (flyingTurn) return 'FLYING · leap to any free point';
+    return 'MOVING · slide along the carved lines';
+  }
+
+  // --- lifecycle ---------------------------------------------------------------
+  Future<void> startNew({
+    required GameMode mode,
+    required Difficulty difficulty,
+    required int humanSeat,
+  }) async {
+    _gameId++;
+    this.mode = mode;
+    this.difficulty = difficulty;
+    this.humanSeat = humanSeat;
+    snap = MorrisSnapshot.initial();
+    if (!SettingsStore.I.humanFirst && mode == GameMode.vsAi) {
+      snap = MorrisSnapshot(
+        board: snap.board,
+        reserve: snap.reserve,
+        turn: 1,
+        plies: 0,
+        pliesNoProgress: 0,
+        positionHistory: snap.positionHistory,
+        millsFormedBy: snap.millsFormedBy,
+        capturesBy: snap.capturesBy,
+      );
+      this.humanSeat = 1;
+    } else {
+      this.humanSeat = mode == GameMode.vsAi ? 0 : humanSeat;
+    }
+    _history.clear();
+    pending = null;
+    selected = -1;
+    winner = null;
+    endReason = null;
+    paused = false;
+    lastPlaced = -1;
+    lastCaptured = -1;
+    millFlash = {};
+    hintFrom = null;
+    hintTo = null;
+    _startedAt = DateTime.now();
+    _evalHistory.clear();
+    Sound.I.gameStart();
+    Sound.I.gameMusic();
+    await _saveGame();
+    notifyListeners();
+    _scheduleBot();
+  }
+
+  /// Returns true when a saved in-progress game exists.
+  Future<bool> hasSavedGame() async {
+    final p = await SharedPreferences.getInstance();
+    return p.containsKey(_kSaved);
+  }
+
+  Future<bool> continueSaved() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString(_kSaved);
+    if (raw == null) return false;
+    try {
+      final j = jsonDecode(raw) as Map<String, Object?>;
+      _gameId++;
+      mode = GameMode.values[(j['mode'] as int?) ?? 0];
+      difficulty = Difficulty.values[(j['difficulty'] as int?) ?? 1];
+      humanSeat = (j['humanSeat'] as int?) ?? 0;
+      snap = MorrisSnapshot.fromJson(j['snapshot'] as Map<String, Object?>);
+      _history.clear();
+      pending = null;
+      selected = -1;
+      winner = null;
+      endReason = null;
+      paused = false;
+      _startedAt = DateTime.fromMillisecondsSinceEpoch(
+          (j['startedAt'] as int?) ?? DateTime.now().millisecondsSinceEpoch);
+      _evalHistory.clear();
+      Sound.I.gameMusic();
+      notifyListeners();
+      _scheduleBot();
+      return true;
+    } catch (_) {
+      await p.remove(_kSaved);
+      return false;
+    }
+  }
+
+  Future<void> _saveGame() async {
+    if (gameOver) return;
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        _kSaved,
+        jsonEncode({
+          'mode': mode.index,
+          'difficulty': difficulty.index,
+          'humanSeat': humanSeat,
+          'snapshot': snap.toJson(),
+          'startedAt': (_startedAt ?? DateTime.now()).millisecondsSinceEpoch,
+        }));
+  }
+
+  Future<void> _clearSaved() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove(_kSaved);
+  }
+
+  // --- human input --------------------------------------------------------------
+  void tapPoint(int i) {
+    if (gameOver || paused || isBotTurn) return;
+    Sound.I.select();
+    if (capturePending) {
+      if (captureTargets.contains(i)) {
+        _resolveHumanCapture(i);
+      } else {
+        Sound.I.invalid();
+      }
+      return;
+    }
+    if (reserve[turn] > 0) {
+      if (board[i] == -1) {
+        _beginHumanPly(-1, i);
+      } else {
+        Sound.I.invalid();
+      }
+      return;
+    }
+    if (selected == -1) {
+      if (board[i] == turn) {
+        selected = i;
+        notifyListeners();
+      }
+      return;
+    }
+    if (selected == i) {
+      selected = -1;
+      notifyListeners();
+      return;
+    }
+    if (board[i] == turn) {
+      selected = i;
+      notifyListeners();
+      return;
+    }
+    if (board[i] == -1 &&
+        (flyingTurn || MorrisBoard.adj[selected].contains(i))) {
+      _beginHumanPly(selected, i);
+    } else {
+      Sound.I.invalid();
+    }
+  }
+
+  void _beginHumanPly(int from, int to) {
+    final preview = _preview(from, to);
+    lastPlaced = to;
+    selected = -1;
+    hintFrom = null;
+    hintTo = null;
+    if (preview.formedMill) {
+      pending = preview;
+      millFlash = _millPoints(board, turn);
+      Sound.I.mill();
+    } else {
+      _finalizePly(preview, -1);
+    }
+    notifyListeners();
+  }
+
+  void _resolveHumanCapture(int at) {
+    final p = pending;
+    if (p == null) return;
+    pending = null;
+    lastCaptured = at;
+    Sound.I.capture();
+    _finalizePly(p, at);
+    notifyListeners();
+  }
+
+  /// Applies the (possibly capture-resolved) ply through the pure engine.
+  void _finalizePly(PendingPly ply, int capture) {
+    _history.add(snap);
+    final mover = snap.turn;
+    final wasFlying = ply.from != -1 &&
+        MorrisEngine.isFlying(snap.board, snap.reserve, mover);
+    final result = MorrisEngine.applyPly(snap, ply.from, ply.to, capture);
+    snap = result.snapshot;
+    millFlash = result.formedMill ? _millPoints(snap.board, mover) : {};
+    // Sounds for the completed ply.
+    if (capture == -1) {
+      if (ply.from == -1) {
+        Sound.I.place();
+      } else if (wasFlying) {
+        Sound.I.fly();
+      } else {
+        Sound.I.move();
+      }
+    }
+    _evalHistory.add(MorrisAi.evaluate(
+        snap.board, snap.reserve, mode == GameMode.vsAi ? 1 - humanSeat : 0));
+    if (result.winner != null) {
+      _finishGame(result.winner!, result.endReason);
+    } else {
+      _saveGame();
+      _scheduleBot();
+    }
+    notifyListeners();
+  }
+
+  Set<int> _millPoints(List<int> board, int p) {
+    final pts = <int>{};
+    for (final mi in MorrisEngine.millsOn(board, p)) {
+      pts.addAll(MorrisBoard.mills[mi]);
+    }
+    return pts;
+  }
+
+  PendingPly _preview(int from, int to) {
+    final b = List<int>.from(snap.board);
+    final r = List<int>.from(snap.reserve);
+    final p = snap.turn;
+    final before = MorrisEngine.millsOn(b, p);
+    if (from != -1) b[from] = -1;
+    b[to] = p;
+    if (from == -1) r[p]--;
+    final formed = MorrisEngine.millsOn(b, p).difference(before).isNotEmpty;
+    return PendingPly(from, to, b, r, formed);
+  }
+
+  // --- bot -----------------------------------------------------------------------
+  void _scheduleBot() {
+    if (!isBotTurn || gameOver || _botScheduled) return;
+    _botScheduled = true;
+    final id = _gameId;
+    Future.delayed(const Duration(milliseconds: 850), () {
+      _botScheduled = false;
+      if (id != _gameId || !isBotTurn || gameOver || paused) return;
+      _botAct();
+    });
+  }
+
+  void _botAct() {
+    final p = turn;
+    final m = MorrisAi.chooseMove(board, reserve, p, difficulty, _rng);
+    if (m[0] == -1 && m[1] == -1) return; // no moves; engine ends game on next check
+    final preview = _preview(m[0], m[1]);
+    lastPlaced = m[1];
+    selected = -1;
+    if (preview.formedMill) {
+      // Brief beat so the mill flash reads before the capture lands.
+      millFlash = _millPoints(preview.board, p);
+      Sound.I.mill();
+      notifyListeners();
+      final id = _gameId;
+      Future.delayed(const Duration(milliseconds: 650), () {
+        if (id != _gameId || gameOver) return;
+        final cap = MorrisAi.chooseCapture(preview.board, p, difficulty, _rng);
+        lastCaptured = cap;
+        Sound.I.capture();
+        _finalizePly(preview, cap);
+      });
+    } else {
+      _finalizePly(preview, -1);
+    }
+  }
+
+  // --- undo / hint -----------------------------------------------------------------
+  void undo() {
+    if (!canUndo) return;
+    final prev = _history.removeLast();
+    // Undo counts as a new move for the no-progress counter (RULES.md §12.5).
+    snap = MorrisSnapshot(
+      board: prev.board,
+      reserve: prev.reserve,
+      turn: prev.turn,
+      plies: prev.plies,
+      pliesNoProgress: prev.pliesNoProgress + 1,
+      positionHistory: prev.positionHistory,
+      millsFormedBy: prev.millsFormedBy,
+      capturesBy: prev.capturesBy,
+    );
+    pending = null;
+    selected = -1;
+    lastPlaced = -1;
+    lastCaptured = -1;
+    millFlash = {};
+    if (_evalHistory.isNotEmpty) _evalHistory.removeLast();
+    Sound.I.undo();
+    _saveGame();
+    notifyListeners();
+  }
+
+  void hint() {
+    if (gameOver || paused || isBotTurn || capturePending) return;
+    final m = MorrisAi.chooseMove(board, reserve, turn, Difficulty.medium, _rng);
+    if (m[1] == -1) return;
+    hintFrom = m[0];
+    hintTo = m[1];
+    Sound.I.click();
+    notifyListeners();
+    final id = _gameId;
+    Future.delayed(const Duration(seconds: 3), () {
+      if (id != _gameId) return;
+      hintFrom = null;
+      hintTo = null;
+      notifyListeners();
+    });
+  }
+
+  // --- draws --------------------------------------------------------------------------
+  final List<double> _evalHistory = [];
+
+  /// Human offers a draw. Vs AI: accepted when the AI's evaluation has stayed
+  /// within ±30 (≈ ±0.3 pawns) for the last 10 plies (RULES.md §10).
+  /// Returns 'accepted' | 'declined' | 'ask' (2P: UI asks the other player).
+  String offerDraw() {
+    if (gameOver || !placementDone) return 'declined';
+    if (mode == GameMode.twoPlayer) return 'ask';
+    final recent = _evalHistory.length >= 10
+        ? _evalHistory.sublist(_evalHistory.length - 10)
+        : _evalHistory;
+    // _evalHistory stores evals from the AI seat's perspective in vsAI.
+    final ok = recent.length >= 10 && recent.every((e) => e.abs() <= 30);
+    if (ok) {
+      _finishGame('draw', 'agreement');
+      return 'accepted';
+    }
+    return 'declined';
+  }
+
+  void acceptDrawOffer() => _finishGame('draw', 'agreement');
+
+  // --- pause / resume --------------------------------------------------------------------
+  void pause() {
+    if (gameOver || paused) return;
+    paused = true;
+    _saveGame();
+    Sound.I.duckMusic();
+    notifyListeners();
+  }
+
+  void resume() {
+    if (!paused) return;
+    paused = false;
+    Sound.I.unduckMusic();
+    notifyListeners();
+    _scheduleBot();
+  }
+
+  void quitToMenu() {
+    _gameId++;
+    _saveGame();
+    Sound.I.menuMusic();
+  }
+
+  // --- game end ------------------------------------------------------------------------------
+  void _finishGame(String win, String? reason) {
+    _gameId++;
+    winner = win;
+    endReason = reason;
+    pending = null;
+    selected = -1;
+    millFlash = {};
+    _clearSaved();
+    final humanWon = mode == GameMode.vsAi && win == '$humanSeat';
+    final humanLost = mode == GameMode.vsAi && win == '${1 - humanSeat}';
+    if (win == 'draw') {
+      Sound.I.draw();
+    } else if (mode == GameMode.vsAi) {
+      if (humanWon) {
+        Sound.I.win();
+      } else {
+        Sound.I.lose();
+      }
+    } else {
+      Sound.I.win();
+    }
+    // Statistics.
+    final mills = snap.millsFormedBy.where((p) => p == humanSeat).length;
+    final caps = snap.capturesBy.where((p) => p == humanSeat).length;
+    var stars = 0;
+    if (mode == GameMode.vsAi && humanWon) {
+      final menLeft = MorrisEngine.pieceCount(snap.board, humanSeat) +
+          snap.reserve[humanSeat];
+      stars = menLeft >= 5 ? 3 : (menLeft >= 3 ? 2 : 1);
+    }
+    final outcome = win == 'draw'
+        ? 'draw'
+        : (mode == GameMode.twoPlayer
+            ? (win == '0' ? 'win' : 'loss')
+            : (humanWon ? 'win' : (humanLost ? 'loss' : 'draw')));
+    StatsStore.I.record(GameResult(
+      outcome: outcome,
+      millsFormed: mills,
+      captures: caps,
+      plies: snap.plies,
+      durationSec: _startedAt == null
+          ? 0
+          : DateTime.now().difference(_startedAt!).inSeconds,
+      stars: stars,
+      difficulty: difficulty,
+      vsAi: mode == GameMode.vsAi,
+    ));
+    notifyListeners();
+    onGameOver?.call();
+  }
+
+  String winnerLabel() {
+    if (winner == null) return '';
+    if (winner == 'draw') return 'Draw';
+    if (mode == GameMode.vsAi) {
+      return winner == '$humanSeat' ? 'Victory' : 'Defeat';
+    }
+    return 'Player ${int.parse(winner!) + 1} Wins';
+  }
+
+  String endReasonLabel() {
+    switch (endReason) {
+      case 'reduction':
+        return 'The rival was ground down to two men.';
+      case 'blocked':
+        return 'The rival has no legal move left. Total lockdown.';
+      case 'repetition':
+        return 'The same position arose three times.';
+      case 'no-progress':
+        return 'Fifty plies passed with no mill and no capture.';
+      case 'agreement':
+        return 'Both sides agreed to lay down their stones.';
+      default:
+        return 'The stones have spoken.';
+    }
+  }
+}
