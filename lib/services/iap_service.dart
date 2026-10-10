@@ -110,10 +110,7 @@ class StoreService {
   }
 
   
-  Future<void> buyPro() async {
-    // Pro removed — everything is free and unlocked.
-  }
-
+  
   Future<void> buyTip(ProductDetails product) async {
     purchaseError.value = null;
     purchaseInProgress.value = true;
