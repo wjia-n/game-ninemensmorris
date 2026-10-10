@@ -31,21 +31,6 @@ class _ProScreenState extends State<ProScreen> {
         widget.store.lastThanks.addListener(_onThanks);
   }
 
-  void _onPro() {
-    if (widget.store.proPurchased.value && mounted) {
-      Sound.I.win();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('PRO unlocked — the full quarry is yours!',
-              style: Lapidary.body(15)),
-          backgroundColor: Lapidary.basalt,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      widget.store.proPurchased.value = false;
-      setState(() {});
-    }
-  }
 
   void _onThanks() {
     final msg = widget.store.lastThanks.value;
