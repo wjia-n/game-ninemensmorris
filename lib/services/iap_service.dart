@@ -141,4 +141,7 @@ class StoreService {
     purchaseInProgress.dispose();
     purchaseError.dispose();
   }
+
+  // Compatibility stub — Pro auto-unlocked.
+  Future<void> buyPro() async {}
 }
