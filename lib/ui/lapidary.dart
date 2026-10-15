@@ -12,7 +12,7 @@ class Lapidary {
   Lapidary._();
 
   // --- palette ---------------------------------------------------------------
-  static const sandstone = Color(0xFFC2A87D); // Roman Sandstone (primary)
+  static const sandstone = Color(0xFFC2A87D); // Sandstone (primary)
   static const sandstoneLight = Color(0xFFDCC79C);
   static const sandstoneDeep = Color(0xFF9A7F57);
   static const bronze = Color(0xFF8C6239); // Cast Speculum Bronze (secondary)

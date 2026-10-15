@@ -185,7 +185,7 @@ class _MenuScreenState extends State<MenuScreen>
                     padding: const EdgeInsets.symmetric(
                         horizontal: 18, vertical: 12),
                     child: Text(
-                      'An ancient duel of mills and cunning — Roman soldiers '
+                      'An ancient duel of mills and cunning — ancient soldiers '
                       'carved these lines into temple stone.',
                       textAlign: TextAlign.center,
                       style: Lapidary.body(13,

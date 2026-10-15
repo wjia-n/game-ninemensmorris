@@ -123,7 +123,7 @@ const List<MorrisTheme> morrisThemes = [
   ),
   MorrisTheme(
     id: 'nile',
-    name: 'Nile Delta',
+    name: 'River Delta',
     blurb: 'River silt and lotus green.',
     proOnly: false,
     sandstone: Color(0xFFB49B6E),
@@ -164,7 +164,7 @@ const List<MorrisTheme> morrisThemes = [
   // --- Pro ------------------------------------------------------------------
   MorrisTheme(
     id: 'marble',
-    name: 'Roman Marble',
+    name: 'Antique Marble',
     blurb: 'Pale Carrara, imperial bronze.',
     proOnly: true,
     sandstone: Color(0xFFD8D2C4),
