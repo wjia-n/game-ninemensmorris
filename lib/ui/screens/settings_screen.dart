@@ -11,6 +11,7 @@ import '../../state/settings.dart';
 import '../../state/stats.dart';
 import '../lapidary.dart';
 import '../widgets.dart';
+import '../../transfer/transfer_ui.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -29,6 +30,7 @@ class SettingsScreen extends StatelessWidget {
                 builder: (context, _) => Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+              TransferSaveTile(gameSlug: 'ninemensmorris'),
                     const Cartouche(
                         title: 'SETTINGS', subtitle: 'ORDO · AVDIO · BOARD'),
                     const SizedBox(height: 16),
